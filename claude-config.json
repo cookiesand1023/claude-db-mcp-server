@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "database": {
+      "command": "node",
+      "args": [
+        "/Users/kuki_kyosuke/torihada/claude-db-mcp-server/dist/index.js"
+      ]
+    }
+  }
+}
