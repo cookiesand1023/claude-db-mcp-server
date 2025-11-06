@@ -489,3 +489,245 @@ console.error('Error:', error.message);
 ## まとめ
 
 Claude DB MCP Serverは、シンプルで安全、かつ拡張性の高いアーキテクチャを採用しています。環境変数ベースの設定により、既存DBへの接続が容易で、MCPプロトコルによりClaude CLIとシームレスに統合されます。
+
+## MCPプロトコルの詳細フロー
+
+### ListToolsRequestSchema vs CallToolRequestSchema
+
+#### ListToolsRequestSchema - ツール一覧の取得
+
+**目的:** 利用可能なツールの定義を返す（メニューを見せる）
+
+**実行タイミング:** Claude Code起動時、またはツール情報が必要な時
+
+**処理内容:**
+```typescript
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const schemaInfo = buildSchemaDescription();  // スキーマ情報を取得
+
+  return {
+    tools: [
+      {
+        name: 'query_database',
+        description: '...',
+        inputSchema: { ... }  // パラメータ定義
+      },
+      // ... 他のツール
+    ]
+  };
+});
+```
+
+#### CallToolRequestSchema - ツールの実行
+
+**目的:** 選択されたツールを実行する（注文を受けて料理を作る）
+
+**実行タイミング:** ユーザーがプロンプトを入力し、Claude AIがツールを選択した時
+
+**処理内容:**
+```typescript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  switch (name) {
+    case 'query_database': {
+      const pool = connectionPools[dbId];
+      const [rows] = await pool.query(sql);  // SQL実行
+      return { content: [...] };
+    }
+    // ... 他のツール実装
+  }
+});
+```
+
+### 完全な実行フロー
+
+```
+┌─────────────────────────────────────────┐
+│ Claude Code 起動                        │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ ListToolsRequestSchema リクエスト       │  ← ツール一覧を取得
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ MCPサーバー: ListToolsRequestSchema     │
+│ ハンドラー実行                          │
+│ → buildSchemaDescription()              │
+│ → ツール定義を返却                      │
+│   - query_database                      │
+│   - list_databases                      │
+│   - list_tables                         │
+│   - describe_table                      │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ Claude AI                               │
+│ - ツール一覧を記憶                      │
+│ - 各ツールの説明・パラメータを理解      │
+│ - スキーマ情報を把握                    │
+└─────────────────────────────────────────┘
+
+               ⋮ (待機状態)
+
+┌─────────────────────────────────────────┐
+│ ユーザーがプロンプト入力                │
+│ "fanmeId99のshopにitemはいくつある？"   │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ Claude AI                               │
+│ - プロンプトを解析                      │
+│ - 記憶しているツール一覧から選択        │
+│ - スキーマ情報から適切なDBを判定        │
+│ - query_database を選択                 │
+│ - パラメータを生成:                     │
+│   {                                     │
+│     query: "...",                       │
+│     dbId: "db4",                        │
+│     sql: "SELECT COUNT(*) FROM ..."    │
+│   }                                     │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ CallToolRequestSchema リクエスト        │  ← ツールを実行
+│ name: "query_database"                  │
+│ arguments: { query, dbId, sql }         │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ MCPサーバー: CallToolRequestSchema      │
+│ ハンドラー実行                          │
+│ 1. switch (name) で分岐                 │
+│ 2. バリデーション                       │
+│    - dbIdの確認                         │
+│    - 危険なクエリチェック               │
+│ 3. pool.query(sql) 実行                 │
+│ 4. 結果を整形して返却                   │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ MySQL Database (db4: shop)              │
+│ SELECT COUNT(*) as item_count           │
+│ FROM items i JOIN shops s               │
+│ ON i.shop_id = s.id                     │
+│ WHERE s.creator_uid = '...'             │
+└──────────────┬──────────────────────────┘
+               │ [{"item_count": 63}]
+               ▼
+┌─────────────────────────────────────────┐
+│ MCPサーバー → Claude Code               │
+│ content: [{                             │
+│   type: 'text',                         │
+│   text: '✅ データベース: shop (db4)   │
+│          📊 取得件数: 1件               │
+│          [{"item_count": 63}]'          │
+│ }]                                      │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ Claude AI                               │
+│ - 結果を受け取る                        │
+│ - 自然言語に整形                        │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│ ユーザーに表示                          │
+│ "fanmeId99のshopには63個のitemが       │
+│  あります。"                            │
+└─────────────────────────────────────────┘
+```
+
+### コード実行順序
+
+#### 起動時（同期処理）
+
+```
+1. モジュールインポート
+   ↓
+2. dotenv.config() - .env読み込み
+   ↓
+3. 関数・型定義（実行されない）
+   ↓
+4. dbConfigs構築
+   for (let i = 1; i <= 10; i++) {
+     buildDbConfig() 実行
+   }
+   ↓
+5. connectionPools構築
+   for (dbId in dbConfigs) {
+     mysql.createPool() 実行
+   }
+   ↓
+6. databaseSchemas = {} 初期化
+   ↓
+7. server = new Server() 作成
+   ↓
+8. setRequestHandler(ListToolsRequestSchema, ...)
+   ↓
+9. setRequestHandler(CallToolRequestSchema, ...)
+```
+
+#### main()関数実行（非同期処理）
+
+```
+10. main() 実行開始
+    ↓
+11. await loadDatabaseSchemas()
+    ├─ for (dbId in connectionPools)
+    │   ├─ SHOW TABLES
+    │   ├─ for (table in tables)
+    │   │   ├─ DESCRIBE table
+    │   │   └─ 外部キー取得
+    │   └─ databaseSchemas[dbId]に保存
+    │
+    console.error('✅ db1: 8 tables')
+    console.error('✅ db2: 56 tables')
+    console.error('✅ db3: 45 tables')
+    console.error('✅ db4: 31 tables')
+    ↓
+12. new StdioServerTransport()
+    ↓
+13. server.connect(transport)
+    ↓
+14. console.error('✅ Claude DB MCP Server running')
+    ↓
+15. 待機状態（リクエストを待つ）
+```
+
+#### リクエスト処理時
+
+```
+ListToolsRequestSchema:
+  buildSchemaDescription()
+  → databaseSchemasを整形
+  → ツール定義を返却
+
+CallToolRequestSchema:
+  switch (name) {
+    case 'query_database':
+      → pool.query(sql) 実行
+      → 結果を返却
+  }
+```
+
+### 主要なクエリ実行箇所
+
+| 場所 | 目的 | 実行タイミング |
+|------|------|--------------|
+| **index.ts:308** | **ユーザークエリ実行** | **プロンプト入力時** |
+| index.ts:116 | テーブル一覧取得 | 起動時 |
+| index.ts:121 | カラム情報取得 | 起動時 |
+| index.ts:124-133 | 外部キー取得 | 起動時 |
+| index.ts:150 | テーブル構造取得 | describe_table実行時 |
+| index.ts:156 | テーブル一覧取得 | list_tables実行時 |
